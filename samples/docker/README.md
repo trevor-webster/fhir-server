@@ -10,12 +10,16 @@ If it is not desirable to clone this repository and build locally an image of th
 
 Using docker-compose this image can be started with the following steps:
 1. Open a terminal window.
+1b. cd 
 2. Set the enviornment variable SAPASSWORD to what you want the SQL access password to be. Be sure to follow the [SQL server password complexity requirements](https://docs.microsoft.com/en-us/sql/relational-databases/security/password-policy?view=sql-server-ver15#password-complexity).
-3. Copy & save a local version of the docker-compose file from the release directory of the fhir-server project.
+```
+$Env:SAPASSWORD = '12Password'
+```
+3. Copy & save a local version of the docker-compose file from the **release** directory of the fhir-server project.
 4. Run the command: 
 
 ```bash
-docker-compose up -d .
+docker-compose up -d 
 ```
 
 5. After giving the container a minute to start up it should be accessable at http://localhost:8080/metadata.
@@ -63,25 +67,40 @@ To build the `azure-fhir-api` image run the following command from the root of t
 The default configuration builds an image with the FHIR R4 API:
 
 ```bash
-docker build -f samples/docker/Dockerfile -t azure-fhir-api .
+docker build -f ./build/docker/Dockerfile -t azure-fhir-api .
 ```
 
 For STU3 use the following command:
 
 ```bash
-docker build -f samples/docker/Dockerfile -t azure-fhir-api --build-arg FHIR_VERSION=Stu3 .
-```
+docker build -f build\docker\Dockerfile -t azure-fhir-api --build-arg FHIR_VERSION=R5 .
+```nn
 
 The container can then be run, specifying configuration details such as:
 
 ```bash
-docker run -d \
-    -e FHIRServer__Security__Enabled="false"
-    -e SqlServer__ConnectionString="Server=tcp:<sql-server-fqdn>,1433;Initial Catalog=FHIR;Persist Security Info=False;User ID=sa;Password=<sql-sa-password>;MultipleActiveResultSets=False;Connection Timeout=30;" \
-    -e SqlServer__AllowDatabaseCreation="true" \
-    -e SqlServer__Initialize="true" \
-    -e SqlServer__SchemaOptions__AutomaticUpdatesEnabled="true" \
-    -e DataStore="SqlServer" \
-    -p 8080:8080
-    azure-fhir-api azure-fhir-api
+docker pull mcr.microsoft.com/healthcareapis/r4-fhir-server
+
+docker run -d `
+    -e FHIRServer__Security__Enabled="false" `
+    -e SqlServer__ConnectionString="Server=tcp:ahs-vdh-fhir-serv.database.usgovcloudapi.net,1433;Initial Catalog=r4-fhir-server_2023-12-28T19-49Z;Persist Security Info=False;User ID=fhir_server_1;Password=Msd9MYLi/ySaMrgIS1oTuWXC7sIP0hepEn1jmJocd8o=;MultipleActiveResultSets=False;Encrypt=True;TrustServerCertificate=False;Connection Timeout=30;" `
+    -e SqlServer__AllowDatabaseCreation="true" `
+    -e SqlServer__Initialize="true" `
+    -e SqlServer__SchemaOptions__AutomaticUpdatesEnabled="true" `
+    -e DataStore="SqlServer" `
+    -p 8080:8080 `
+    mcr.microsoft.com/healthcareapis/r4-fhir-server azure-fhir-api
+```
+```
+docker commit 9e1a6a7882eb ahsvdhfhircr.azurecr.us/r4-fhir-server
+az acr login -n ahsvdhfhircr.azurecr.us
+docker push  ahsvdhfhircr.azurecr.us/r4-fhir-server
+
+https://fhir-server.scm.azurewebsites.net/Env
+```
+
+
+```
+docker run -d -p 8080:8080 ahsvdhfhircr.azurecr.us/r4-fhir-server azure-fhir-api
+    
 ```
