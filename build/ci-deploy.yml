@@ -32,6 +32,7 @@ stages:
   - template: ./jobs/docker-build-all.yml
     parameters: 
       tag: $(ImageTag)
+      buildPlatform: $(publicDockerImagePlatforms)
 
 - stage: provisionEnvironment
   displayName: Provision Environment
@@ -41,7 +42,7 @@ stages:
   - job: provision
     dependsOn: DeleteResourceGroup 
     steps:
-    - task: AzurePowerShell@4
+    - task: AzurePowerShell@5
       displayName: Provision Resource Group
       inputs:
         azureSubscription: $(ConnectedServiceName)

@@ -22,6 +22,7 @@ using Microsoft.Health.Core.Features.Context;
 using Microsoft.Health.Extensions.DependencyInjection;
 using Microsoft.Health.Fhir.Core.Configs;
 using Microsoft.Health.Fhir.Core.Exceptions;
+using Microsoft.Health.Fhir.Core.Extensions;
 using Microsoft.Health.Fhir.Core.Features.Context;
 using Microsoft.Health.Fhir.Core.Features.Operations.Export.ExportDestinationClient;
 using Microsoft.Health.Fhir.Core.Features.Operations.Export.Models;
@@ -105,13 +106,23 @@ namespace Microsoft.Health.Fhir.Core.Features.Operations.Export
 
             var existingFhirRequestContext = _contextAccessor.RequestContext;
 
+            // Don't allow jobs to loop forever if they are failing.
+            if (exportJobRecord.RestartCount > _exportJobConfiguration.MaxJobRestartCount)
+            {
+                _exportJobRecord.Status = OperationStatus.Failed;
+                _exportJobRecord.FailureDetails = new JobFailureDetails("Job has been retried too many times.", HttpStatusCode.InternalServerError);
+                _logger.LogError("[JobId:{JobId}]" + _exportJobRecord.FailureDetails.FailureReason, _exportJobRecord.Id);
+                await CompleteJobAsync(OperationStatus.Failed, cancellationToken);
+                return;
+            }
+
             try
             {
                 _exportJobRecord.Status = OperationStatus.Running;
 
                 ExportJobConfiguration exportJobConfiguration = _exportJobConfiguration;
 
-                // Add a request context so that bundle issues can be added by the SearchOptionFactory
+                // Add a request context so that bundle issues can be added by the SearchOptionsFactory
                 var fhirRequestContext = new FhirRequestContext(
                     method: "Export",
                     uriString: "$export",
@@ -188,33 +199,42 @@ namespace Microsoft.Health.Fhir.Core.Features.Operations.Export
                     queryParametersList.Add(Tuple.Create(KnownQueryParameterNames.LastUpdated, $"ge{_exportJobRecord.Since}"));
                 }
 
+                var exportResourceVersionTypes = ResourceVersionType.Latest |
+                    (_exportJobRecord.IncludeHistory ? ResourceVersionType.History : 0) |
+                    (_exportJobRecord.IncludeDeleted ? ResourceVersionType.SoftDeleted : 0);
+
+                if (_exportJobRecord.FeedRange is not null)
+                {
+                    queryParametersList.Add(Tuple.Create(KnownQueryParameterNames.FeedRange, _exportJobRecord.FeedRange));
+                }
+
                 ExportJobProgress progress = _exportJobRecord.Progress;
 
-                await RunExportSearch(exportJobConfiguration, progress, queryParametersList, cancellationToken);
+                await RunExportSearch(exportJobConfiguration, progress, queryParametersList, exportResourceVersionTypes, cancellationToken);
 
                 await CompleteJobAsync(OperationStatus.Completed, cancellationToken);
 
-                _logger.LogTrace("Successfully completed the job.");
+                _logger.LogTrace("[JobId:{JobId}] Successfully completed the job.", _exportJobRecord.Id);
             }
             catch (JobSegmentCompletedException)
             {
                 await CompleteJobAsync(OperationStatus.Completed, cancellationToken);
 
-                _logger.LogTrace("Successfully completed a segment of the job.");
+                _logger.LogTrace("[JobId:{JobId}] Successfully completed a segment of the job.", _exportJobRecord.Id);
             }
             catch (JobConflictException)
             {
                 // The export job was updated externally. There might be some additional resources that were exported
                 // but we will not be updating the job record.
-                _logger.LogTrace("The job was updated by another process.");
+                _logger.LogWarning("[JobId:{JobId}] The job was updated by another process.", _exportJobRecord.Id);
             }
-            catch (RequestRateExceededException)
+            catch (RequestRateExceededException rree)
             {
-                _logger.LogTrace("Job failed due to RequestRateExceeded.");
+                _logger.LogWarning(rree, "[JobId:{JobId}] Job failed due to RequestRateExceeded.", _exportJobRecord.Id);
             }
             catch (DestinationConnectionException dce)
             {
-                _logger.LogInformation(dce, "Can't connect to destination. The job will be marked as failed.");
+                _logger.LogInformation(dce, "[JobId:{JobId}] Can't connect to destination. The job will be marked as failed.", _exportJobRecord.Id);
 
                 _exportJobRecord.FailureDetails = new JobFailureDetails(dce.Message, dce.StatusCode);
                 await CompleteJobAsync(OperationStatus.Failed, cancellationToken);
@@ -223,11 +243,11 @@ namespace Microsoft.Health.Fhir.Core.Features.Operations.Export
             {
                 if (rnfe.ResourceKey?.ResourceType == KnownResourceTypes.Group)
                 {
-                    _logger.LogInformation(rnfe, "Can't find specified resource. The job will be marked as failed.");
+                    _logger.LogInformation(rnfe, "[JobId:{JobId}] Can't find specified resource. The job will be marked as failed.", _exportJobRecord.Id);
                 }
                 else
                 {
-                    _logger.LogError(rnfe, "Can't find specified resource. The job will be marked as failed.");
+                    _logger.LogError(rnfe, "[JobId:{JobId}] Can't find specified resource. The job will be marked as failed.", _exportJobRecord.Id);
                 }
 
                 _exportJobRecord.FailureDetails = new JobFailureDetails(rnfe.Message, HttpStatusCode.BadRequest);
@@ -235,35 +255,35 @@ namespace Microsoft.Health.Fhir.Core.Features.Operations.Export
             }
             catch (FailedToParseAnonymizationConfigurationException ex)
             {
-                _logger.LogError(ex, "Failed to parse anonymization configuration. The job will be marked as failed.");
+                _logger.LogError(ex, "[JobId:{JobId}] Failed to parse anonymization configuration. The job will be marked as failed.", _exportJobRecord.Id);
 
                 _exportJobRecord.FailureDetails = new JobFailureDetails(ex.Message, HttpStatusCode.BadRequest);
                 await CompleteJobAsync(OperationStatus.Failed, cancellationToken);
             }
             catch (FailedToAnonymizeResourceException ex)
             {
-                _logger.LogError(ex, "Failed to anonymize resource. The job will be marked as failed.");
+                _logger.LogError(ex, "[JobId:{JobId}] Failed to anonymize resource. The job will be marked as failed.", _exportJobRecord.Id);
 
                 _exportJobRecord.FailureDetails = new JobFailureDetails(string.Format(Core.Resources.FailedToAnonymizeResource, ex.Message), HttpStatusCode.BadRequest);
                 await CompleteJobAsync(OperationStatus.Failed, cancellationToken);
             }
             catch (AnonymizationConfigurationNotFoundException ex)
             {
-                _logger.LogError(ex, "Cannot found anonymization configuration. The job will be marked as failed.");
+                _logger.LogError(ex, "[JobId:{JobId}] Cannot found anonymization configuration. The job will be marked as failed.", _exportJobRecord.Id);
 
                 _exportJobRecord.FailureDetails = new JobFailureDetails(ex.Message, HttpStatusCode.BadRequest);
                 await CompleteJobAsync(OperationStatus.Failed, cancellationToken);
             }
             catch (AnonymizationConfigurationFetchException ex)
             {
-                _logger.LogError(ex, "Failed to fetch anonymization configuration file. The job will be marked as failed.");
+                _logger.LogError(ex, "[JobId:{JobId}] Failed to fetch anonymization configuration file. The job will be marked as failed.", _exportJobRecord.Id);
 
                 _exportJobRecord.FailureDetails = new JobFailureDetails(ex.Message, HttpStatusCode.BadRequest);
                 await CompleteJobAsync(OperationStatus.Failed, cancellationToken);
             }
             catch (RequestEntityTooLargeException retle)
             {
-                _logger.LogError(retle, "Unable to update the ExportJobRecord as it exceeds CosmosDb document max size. The job will be marked as failed.");
+                _logger.LogError(retle, "[JobId:{JobId}] Unable to update the ExportJobRecord as it exceeds CosmosDb document max size. The job will be marked as failed.", _exportJobRecord.Id);
 
                 _exportJobRecord.FailureDetails = new JobFailureDetails(Core.Resources.RequestEntityTooLargeExceptionDuringExport, HttpStatusCode.RequestEntityTooLarge);
 
@@ -271,11 +291,16 @@ namespace Microsoft.Health.Fhir.Core.Features.Operations.Export
                 _exportJobRecord.Output.Clear();
                 await CompleteJobAsync(OperationStatus.Failed, cancellationToken);
             }
+            catch (Exception ex) when ((ex is OperationCanceledException || ex is TaskCanceledException) && cancellationToken.IsCancellationRequested)
+            {
+                _logger.LogInformation(ex, "[JobId:{JobId}] The job was canceled.", _exportJobRecord.Id);
+                await CompleteJobAsync(OperationStatus.Canceled, CancellationToken.None);
+            }
             catch (Exception ex)
             {
                 // The job has encountered an error it cannot recover from.
                 // Try to update the job to failed state.
-                _logger.LogError(ex, "Encountered an unhandled exception. The job will be marked as failed.");
+                _logger.LogError(ex, "[JobId:{JobId}] Encountered an unhandled exception. The job will be marked as failed.", _exportJobRecord.Id);
 
                 _exportJobRecord.FailureDetails = new JobFailureDetails(Core.Resources.UnknownError, HttpStatusCode.InternalServerError, string.Concat(ex.Message + "\n\r" + ex.StackTrace));
                 await CompleteJobAsync(OperationStatus.Failed, cancellationToken);
@@ -300,7 +325,7 @@ namespace Microsoft.Health.Fhir.Core.Features.Operations.Export
             bool isAnonymizedExport = IsAnonymizedExportJob();
 
             _logger.LogInformation(
-                "Export job completed. Id: {Id}, Status {Status}, Queued Time: {QueuedTime}, End Time: {EndTime}, DataSize: {DataSize}, IsAnonymizedExport: {IsAnonymizedExport}",
+                "Export job completed. Id: {JobId}, Status {Status}, Queued Time: {QueuedTime}, End Time: {EndTime}, DataSize: {DataSize}, IsAnonymizedExport: {IsAnonymizedExport}",
                 id,
                 status,
                 queuedTime,
@@ -340,6 +365,7 @@ namespace Microsoft.Health.Fhir.Core.Features.Operations.Export
             ExportJobConfiguration exportJobConfiguration,
             ExportJobProgress progress,
             List<Tuple<string, string>> sharedQueryParametersList,
+            ResourceVersionType resourceVersionTypes,
             CancellationToken cancellationToken)
         {
             EnsureArg.IsNotNull(exportJobConfiguration, nameof(exportJobConfiguration));
@@ -366,7 +392,7 @@ namespace Microsoft.Health.Fhir.Core.Features.Operations.Export
 
             if (progress.CurrentFilter != null)
             {
-                await ProcessFilter(exportJobConfiguration, progress, queryParametersList, sharedQueryParametersList, anonymizer, cancellationToken);
+                await ProcessFilter(exportJobConfiguration, progress, queryParametersList, sharedQueryParametersList, resourceVersionTypes, anonymizer, cancellationToken);
             }
 
             if (_exportJobRecord.Filters != null && _exportJobRecord.Filters.Any(filter => !progress.CompletedFilters.Contains(filter)))
@@ -379,7 +405,7 @@ namespace Microsoft.Health.Fhir.Core.Features.Operations.Export
                         (_exportJobRecord.ExportType == ExportJobType.All || filter.ResourceType.Equals(KnownResourceTypes.Patient, StringComparison.OrdinalIgnoreCase)))
                     {
                         progress.SetFilter(filter);
-                        await ProcessFilter(exportJobConfiguration, progress, queryParametersList, sharedQueryParametersList, anonymizer, cancellationToken);
+                        await ProcessFilter(exportJobConfiguration, progress, queryParametersList, sharedQueryParametersList, resourceVersionTypes, anonymizer, cancellationToken);
                     }
                 }
             }
@@ -418,7 +444,7 @@ namespace Microsoft.Health.Fhir.Core.Features.Operations.Export
                     }
                 }
 
-                await SearchWithFilter(exportJobConfiguration, progress, null, queryParametersList, sharedQueryParametersList, anonymizer, cancellationToken);
+                await SearchWithFilter(exportJobConfiguration, progress, null, queryParametersList, sharedQueryParametersList, resourceVersionTypes, anonymizer, cancellationToken);
             }
         }
 
@@ -427,6 +453,7 @@ namespace Microsoft.Health.Fhir.Core.Features.Operations.Export
             ExportJobProgress exportJobProgress,
             List<Tuple<string, string>> queryParametersList,
             List<Tuple<string, string>> sharedQueryParametersList,
+            ResourceVersionType resourceVersionTypes,
             IAnonymizer anonymizer,
             CancellationToken cancellationToken)
         {
@@ -436,7 +463,7 @@ namespace Microsoft.Health.Fhir.Core.Features.Operations.Export
                 filterQueryParametersList.Add(param);
             }
 
-            await SearchWithFilter(exportJobConfiguration, exportJobProgress, exportJobProgress.CurrentFilter.ResourceType, filterQueryParametersList, sharedQueryParametersList, anonymizer, cancellationToken);
+            await SearchWithFilter(exportJobConfiguration, exportJobProgress, exportJobProgress.CurrentFilter.ResourceType, filterQueryParametersList, sharedQueryParametersList, resourceVersionTypes, anonymizer, cancellationToken);
 
             exportJobProgress.MarkFilterFinished();
             await UpdateJobRecordAsync(cancellationToken);
@@ -448,6 +475,7 @@ namespace Microsoft.Health.Fhir.Core.Features.Operations.Export
             string resourceType,
             List<Tuple<string, string>> queryParametersList,
             List<Tuple<string, string>> sharedQueryParametersList,
+            ResourceVersionType resourceVersionTypes,
             IAnonymizer anonymizer,
             CancellationToken cancellationToken)
         {
@@ -469,7 +497,8 @@ namespace Microsoft.Health.Fhir.Core.Features.Operations.Export
                                 resourceType: resourceType,
                                 queryParametersList,
                                 cancellationToken,
-                                true);
+                                true,
+                                resourceVersionTypes);
                         }
 
                         break;
@@ -517,7 +546,6 @@ namespace Microsoft.Health.Fhir.Core.Features.Operations.Export
 
                 if (searchResult.ContinuationToken == null)
                 {
-                    // No more continuation token, we are done.
                     break;
                 }
 
@@ -674,31 +702,36 @@ namespace Microsoft.Health.Fhir.Core.Features.Operations.Export
             foreach (SearchResultEntry result in searchResults)
             {
                 ResourceWrapper resourceWrapper = result.Resource;
-                var data = result.Resource.RawResource.Data;
+                ResourceElement overrideDataElement = null;
+                var addSoftDeletedExtension = resourceWrapper.IsDeleted && _exportJobRecord.IncludeDeleted;
 
                 if (anonymizer != null)
                 {
-                    ResourceElement element = _resourceDeserializer.Deserialize(resourceWrapper);
+                    overrideDataElement = _resourceDeserializer.Deserialize(resourceWrapper);
                     try
                     {
-                        element = anonymizer.Anonymize(element);
+                        overrideDataElement = anonymizer.Anonymize(overrideDataElement);
                     }
                     catch (Exception ex)
                     {
                         throw new FailedToAnonymizeResourceException(ex.Message, ex);
                     }
-
-                    // Serialize into NDJson and write to the file.
-                    data = _resourceToByteArraySerializer.StringSerialize(element);
                 }
-                else if (!resourceWrapper.RawResource.IsMetaSet)
+                else if (!resourceWrapper.RawResource.IsMetaSet || addSoftDeletedExtension)
                 {
                     // For older records in Cosmos the metadata isn't included in the raw resource
-                    ResourceElement element = _resourceDeserializer.Deserialize(resourceWrapper);
-                    data = _resourceToByteArraySerializer.StringSerialize(element);
+                    overrideDataElement = _resourceDeserializer.Deserialize(resourceWrapper);
                 }
 
-                _fileManager.WriteToFile(resourceWrapper.ResourceTypeName, data);
+                var outputData = result.Resource.RawResource.Data;
+
+                // If any modifications were made to the resource / are needed, serialize the element instead of using the raw data string.
+                if (overrideDataElement is not null)
+                {
+                    outputData = _resourceToByteArraySerializer.StringSerialize(overrideDataElement, addSoftDeletedExtension);
+                }
+
+                _fileManager.WriteToFile(resourceWrapper.ResourceTypeName, outputData);
             }
         }
 

@@ -28,6 +28,7 @@ namespace Microsoft.Health.Fhir.Api.Features.Audit
     /// </summary>
     public class AuditHelper : IAuditHelper
     {
+        internal const string ProcessingDurationMs = "processingDurationMs";
         internal const string DefaultCallerAgent = "Microsoft.Health.Fhir.Server";
         internal const string UnknownOperationType = "Unknown";
 
@@ -122,7 +123,7 @@ namespace Microsoft.Health.Fhir.Api.Features.Audit
                 if (durationMs != null)
                 {
                     additionalProperties = new Dictionary<string, string>();
-                    additionalProperties["durationMs"] = durationMs.ToString();
+                    additionalProperties[ProcessingDurationMs] = durationMs.ToString();
                 }
 
                 _auditLogger.LogAudit(
@@ -145,9 +146,9 @@ namespace Microsoft.Health.Fhir.Api.Features.Audit
         /// Return all the values of constants of the specified type
         /// </summary>
         /// <returns>List of constant values</returns>
-        private static IList<string> GetAnonymousOperations()
+        private static List<string> GetAnonymousOperations()
         {
-            IList<string> anonymousOperations = new List<string>();
+            List<string> anonymousOperations = new List<string>();
             FieldInfo[] fieldInfos = typeof(FhirAnonymousOperationType).GetFields(BindingFlags.Public | BindingFlags.Static | BindingFlags.FlattenHierarchy);
 
             // Go through the list and only pick out the constants

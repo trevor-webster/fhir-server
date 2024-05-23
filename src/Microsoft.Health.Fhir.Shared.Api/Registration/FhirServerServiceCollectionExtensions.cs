@@ -12,6 +12,7 @@ using EnsureThat;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.Extensions.Configuration;
+using Microsoft.Extensions.DependencyInjection.Extensions;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Health.Api.Features.Audit;
 using Microsoft.Health.Api.Features.Headers;
@@ -28,6 +29,7 @@ using Microsoft.Health.Fhir.Api.Features.Routing;
 using Microsoft.Health.Fhir.Api.Features.Throttling;
 using Microsoft.Health.Fhir.Core.Features.Cors;
 using Microsoft.Health.Fhir.Core.Features.Persistence.Orchestration;
+using Microsoft.Health.Fhir.Core.Logging.Metrics;
 using Microsoft.Health.Fhir.Core.Registration;
 using Polly;
 
@@ -52,16 +54,16 @@ namespace Microsoft.Extensions.DependencyInjection
             EnsureArg.IsNotNull(services, nameof(services));
 
             services.AddOptions();
-            services.AddMvc(options =>
+
+            services.AddControllers(options =>
                 {
-                    options.EnableEndpointRouting = false;
+                    options.EnableEndpointRouting = true;
                     options.RespectBrowserAcceptHeader = true;
                 })
                 .AddNewtonsoftJson(options =>
                 {
                     options.SerializerSettings.DateParseHandling = Newtonsoft.Json.DateParseHandling.DateTimeOffset;
-                })
-                .AddRazorRuntimeCompilation();
+                });
 
             var fhirServerConfiguration = new FhirServerConfiguration();
 
@@ -115,6 +117,8 @@ namespace Microsoft.Extensions.DependencyInjection
                 }
             }
 
+            AddMetricEmitter(services);
+
             return new FhirServerBuilder(services);
         }
 
@@ -133,7 +137,7 @@ namespace Microsoft.Extensions.DependencyInjection
 
             fhirServerBuilder.Services.AddHostedService<ReindexJobWorkerBackgroundService>();
 
-            if (runtimeConfiguration.IsExportBackgroundWorkedSupported)
+            if (runtimeConfiguration.IsExportBackgroundWorkerSupported)
             {
                 fhirServerBuilder.Services.AddHostedService<LegacyExportJobWorkerBackgroundService>();
             }
@@ -151,6 +155,17 @@ namespace Microsoft.Extensions.DependencyInjection
             fhirServerBuilder.Services.AddSingleton<IBundleOrchestrator, BundleOrchestrator>();
 
             return fhirServerBuilder;
+        }
+
+        /// <summary>
+        /// Registers the default metric emitter.
+        /// </summary>
+        private static void AddMetricEmitter(IServiceCollection services)
+        {
+            // Register the metric handlers used by the service.
+            services.TryAddSingleton<IBundleMetricHandler, DefaultBundleMetricHandler>();
+            services.TryAddSingleton<ICrudMetricHandler, DefaultCrudMetricHandler>();
+            services.TryAddSingleton<ISearchMetricHandler, DefaultSearchMetricHandler>();
         }
 
         private class FhirServerBuilder : IFhirServerBuilder

@@ -6,11 +6,13 @@
 using System;
 using System.Collections.Generic;
 using System.Globalization;
+using System.Linq;
 using Azure.Monitor.OpenTelemetry.AspNetCore;
 using MediatR;
 using Microsoft.ApplicationInsights.Extensibility;
 using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.AspNetCore.Builder;
+using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.HttpOverrides;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
@@ -23,6 +25,7 @@ using Microsoft.Health.Fhir.Azure;
 using Microsoft.Health.Fhir.Core.Configs;
 using Microsoft.Health.Fhir.Core.Extensions;
 using Microsoft.Health.Fhir.Core.Features;
+using Microsoft.Health.Fhir.Core.Features.Telemetry;
 using Microsoft.Health.Fhir.Core.Messages.Storage;
 using Microsoft.Health.Fhir.Core.Registration;
 using Microsoft.Health.Fhir.Shared.Web;
@@ -31,7 +34,9 @@ using Microsoft.Health.JobManagement;
 using Microsoft.Health.SqlServer.Configs;
 using Microsoft.Net.Http.Headers;
 using OpenTelemetry.Instrumentation.AspNetCore;
+using OpenTelemetry.Logs;
 using OpenTelemetry.Resources;
+using TelemetryConfiguration = Microsoft.Health.Fhir.Core.Configs.TelemetryConfiguration;
 
 namespace Microsoft.Health.Fhir.Web
 {
@@ -106,8 +111,7 @@ namespace Microsoft.Health.Fhir.Web
                 services.AddPrometheusMetrics(Configuration);
             }
 
-            AddApplicationInsightsTelemetry(services);
-            AddAzureMonitorOpenTelemetry(services);
+            AddTelemetryProvider(services);
         }
 
         private void AddDataStore(IServiceCollection services, IFhirServerBuilder fhirServerBuilder, IFhirRuntimeConfiguration runtimeConfiguration)
@@ -189,7 +193,7 @@ namespace Microsoft.Health.Fhir.Web
                     string instanceKey = KnownHeaders.InstanceId;
                     if (!context.Response.Headers.ContainsKey(instanceKey))
                     {
-                        context.Response.Headers.Add(instanceKey, new StringValues(instanceId));
+                        context.Response.Headers[instanceKey] = new StringValues(instanceId);
                     }
                 }
 
@@ -201,24 +205,53 @@ namespace Microsoft.Health.Fhir.Web
             }
 
             app.UsePrometheusHttpMetrics();
-            app.UseFhirServer();
-            app.UseDevelopmentIdentityProviderIfConfigured();
+            app.UseFhirServer(DevelopmentIdentityProviderRegistrationExtensions.UseDevelopmentIdentityProviderIfConfigured);
         }
 
         /// <summary>
         /// Adds ApplicationInsights for telemetry and logging.
         /// </summary>
-        private void AddApplicationInsightsTelemetry(IServiceCollection services)
+        private static void AddApplicationInsightsTelemetry(IServiceCollection services, TelemetryConfiguration configuration)
         {
-            string instrumentationKey = Configuration["ApplicationInsights:InstrumentationKey"];
-
-            if (!string.IsNullOrWhiteSpace(instrumentationKey) && string.IsNullOrWhiteSpace(Configuration["AzureMonitor:ConnectionString"]))
+            if (configuration.Provider == TelemetryProvider.ApplicationInsights
+                && (!string.IsNullOrWhiteSpace(configuration.InstrumentationKey) || !string.IsNullOrWhiteSpace(configuration.ConnectionString)))
             {
                 services.AddHttpContextAccessor();
-                services.AddApplicationInsightsTelemetry(instrumentationKey);
+                services.AddApplicationInsightsTelemetry(options =>
+                {
+                    if (!string.IsNullOrWhiteSpace(configuration.InstrumentationKey))
+                    {
+#pragma warning disable CS0618 // Type or member is obsolete
+                        options.InstrumentationKey = configuration.InstrumentationKey;
+#pragma warning restore CS0618 // Type or member is obsolete
+                    }
+                    else
+                    {
+                        options.ConnectionString = configuration.ConnectionString;
+                    }
+                });
                 services.AddSingleton<ITelemetryInitializer, CloudRoleNameTelemetryInitializer>();
                 services.AddSingleton<ITelemetryInitializer, UserAgentHeaderTelemetryInitializer>();
-                services.AddLogging(loggingBuilder => loggingBuilder.AddApplicationInsights(instrumentationKey));
+                services.AddLogging(loggingBuilder =>
+                {
+                    loggingBuilder.AddApplicationInsights(
+                        options =>
+                        {
+                            if (!string.IsNullOrWhiteSpace(configuration.InstrumentationKey))
+                            {
+#pragma warning disable CS0618 // Type or member is obsolete
+                                options.InstrumentationKey = configuration.InstrumentationKey;
+#pragma warning restore CS0618 // Type or member is obsolete
+                            }
+                            else
+                            {
+                                options.ConnectionString = configuration.ConnectionString;
+                            }
+                        },
+                        options =>
+                        {
+                        });
+                });
             }
         }
 
@@ -234,6 +267,8 @@ namespace Microsoft.Health.Fhir.Web
                 {
                     options.Authority = securityConfiguration.Authentication.Authority;
                     options.Audience = securityConfiguration.Authentication.Audience;
+                    options.TokenValidationParameters.RoleClaimType = securityConfiguration.Authorization.RolesClaim;
+                    options.MapInboundClaims = false;
                     options.RequireHttpsMetadata = true;
                     options.Challenge = $"Bearer authorization_uri=\"{securityConfiguration.Authentication.Authority}\", resource_id=\"{securityConfiguration.Authentication.Audience}\", realm=\"{securityConfiguration.Authentication.Audience}\"";
                 });
@@ -242,24 +277,26 @@ namespace Microsoft.Health.Fhir.Web
         /// <summary>
         /// Adds AzureMonitorOpenTelemetry for telemetry and logging.
         /// </summary>
-        private void AddAzureMonitorOpenTelemetry(IServiceCollection services)
+        private static void AddAzureMonitorOpenTelemetry(IServiceCollection services, TelemetryConfiguration configuration)
         {
-            string connectionString = Configuration["AzureMonitor:ConnectionString"];
-
-            if (!string.IsNullOrWhiteSpace(connectionString))
+            if (configuration.Provider == TelemetryProvider.OpenTelemetry && !string.IsNullOrWhiteSpace(configuration.ConnectionString))
             {
+                services.AddHttpContextAccessor();
                 services.AddOpenTelemetry()
-                    .UseAzureMonitor(options => options.ConnectionString = connectionString)
-                    .ConfigureResource(resourceBuilder =>
+                    .UseAzureMonitor(options =>
+                    {
+                        options.ConnectionString = configuration.ConnectionString;
+                    })
+                    .ConfigureResource(builder =>
                     {
                         var resourceAttributes = new Dictionary<string, object>()
                         {
                             { "service.name", "Microsoft FHIR Server" },
                         };
 
-                        resourceBuilder.AddAttributes(resourceAttributes);
+                        builder.AddAttributes(resourceAttributes);
                     });
-                services.Configure<AspNetCoreInstrumentationOptions>(options =>
+                services.Configure<AspNetCoreTraceInstrumentationOptions>(options =>
                     {
                         options.RecordException = true;
                         options.EnrichWithHttpRequest = (activity, request) =>
@@ -267,10 +304,64 @@ namespace Microsoft.Health.Fhir.Web
                             if (request.Headers.TryGetValue(HeaderNames.UserAgent, out var userAgent))
                             {
                                 string propertyName = HeaderNames.UserAgent.Replace('-', '_').ToLower(CultureInfo.InvariantCulture);
-                                activity.AddTag(propertyName, userAgent);
+                                activity?.SetTag(propertyName, userAgent);
+                            }
+                        };
+                        options.EnrichWithHttpResponse = (activity, response) =>
+                        {
+                            var request = response?.HttpContext?.Request;
+                            if (request != null)
+                            {
+                                var name = request.Path.Value;
+                                if (request.RouteValues != null
+                                    && request.RouteValues.TryGetValue(KnownHttpRequestProperties.RouteValueAction, out var action)
+                                    && request.RouteValues.TryGetValue(KnownHttpRequestProperties.RouteValueController, out var controller))
+                                {
+                                    name = $"{controller}/{action}";
+                                    var parameterArray = request.RouteValues.Keys?.Where(
+                                        k => k.Contains(KnownHttpRequestProperties.RouteValueParameterSuffix, StringComparison.OrdinalIgnoreCase))
+                                        .OrderBy(k => k, StringComparer.OrdinalIgnoreCase)
+                                        .ToArray();
+                                    if (parameterArray != null && parameterArray.Any())
+                                    {
+                                        name += $" [{string.Join("/", parameterArray)}]";
+                                    }
+                                }
+
+                                if (!string.IsNullOrWhiteSpace(name))
+                                {
+                                    activity?.SetTag(KnownApplicationInsightsDimensions.OperationName, $"{request.Method} {name}");
+                                }
                             }
                         };
                     });
+                services.Configure<OpenTelemetryLoggerOptions>(options =>
+                    {
+                        options.AddProcessor(sp =>
+                        {
+                            var httpContextAccessor = sp.GetRequiredService<IHttpContextAccessor>();
+                            return new AzureMonitorOpenTelemetryLogEnricher(httpContextAccessor);
+                        });
+                    });
+            }
+        }
+
+        /// <summary>
+        /// Adds the telemetry provider.
+        /// </summary>
+        private void AddTelemetryProvider(IServiceCollection services)
+        {
+            var configuration = new TelemetryConfiguration();
+            Configuration.GetSection("Telemetry").Bind(configuration);
+
+            switch (configuration.Provider)
+            {
+                case TelemetryProvider.ApplicationInsights:
+                    Startup.AddApplicationInsightsTelemetry(services, configuration);
+                    break;
+                case TelemetryProvider.OpenTelemetry:
+                    Startup.AddAzureMonitorOpenTelemetry(services, configuration);
+                    break;
             }
         }
     }

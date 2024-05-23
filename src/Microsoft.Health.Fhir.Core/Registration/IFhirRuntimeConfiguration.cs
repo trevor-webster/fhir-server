@@ -17,11 +17,21 @@ namespace Microsoft.Health.Fhir.Core.Registration
         /// <summary>
         /// Export background worker.
         /// </summary>
-        bool IsExportBackgroundWorkedSupported { get; }
+        bool IsExportBackgroundWorkerSupported { get; }
 
         /// <summary>
         /// Customer Key Validation background worker keeps running and checking the health of customer managed key.
         /// </summary>
-        bool IsCustomerKeyValidationBackgroudWorkerSupported { get; }
+        bool IsCustomerKeyValidationBackgroundWorkerSupported { get; }
+
+        /// <summary>
+        /// Support to transactions.
+        /// </summary>
+        bool IsTransactionSupported { get; }
+
+        /// <summary>
+        /// Supports the 'latency-over-efficiency' HTTP header.
+        /// </summary>
+        bool IsLatencyOverEfficiencySupported { get; }
     }
 }

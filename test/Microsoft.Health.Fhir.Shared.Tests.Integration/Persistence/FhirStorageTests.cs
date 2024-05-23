@@ -14,9 +14,9 @@ using Hl7.Fhir.ElementModel;
 using Hl7.Fhir.Model;
 using Hl7.Fhir.Serialization;
 using MediatR;
+using Microsoft.Data.SqlClient;
 using Microsoft.Health.Abstractions.Exceptions;
 using Microsoft.Health.Abstractions.Features.Transactions;
-using Microsoft.Health.Core.Internal;
 using Microsoft.Health.Fhir.Core;
 using Microsoft.Health.Fhir.Core.Exceptions;
 using Microsoft.Health.Fhir.Core.Extensions;
@@ -68,6 +68,50 @@ namespace Microsoft.Health.Fhir.Tests.Integration.Persistence
         }
 
         protected Mediator Mediator { get; }
+
+        [Theory]
+        [InlineData(5)] // should succeed
+        [InlineData(35)] // shoul fail
+        [FhirStorageTestsFixtureArgumentSets(DataStore.SqlServer)]
+        public async Task RetriesOnConflict(int requestedExceptions)
+        {
+            try
+            {
+                await _fixture.SqlHelper.ExecuteSqlCmd("TRUNCATE TABLE EventLog");
+                await _fixture.SqlHelper.ExecuteSqlCmd(@$"
+CREATE TRIGGER Resource_Trigger ON Resource FOR INSERT
+AS
+IF (SELECT count(*) FROM EventLog WHERE Process = 'MergeResources' AND Status = 'Error') < {requestedExceptions}
+  INSERT INTO Resource SELECT * FROM inserted -- this will cause dup key exception which is treated as a conflict
+                    ");
+
+                var patient = (Patient)Samples.GetJsonSample("Patient").ToPoco();
+                patient.Id = Guid.NewGuid().ToString();
+                try
+                {
+                    await Mediator.UpsertResourceAsync(patient.ToResourceElement());
+                    if (requestedExceptions > 30)
+                    {
+                        Assert.Fail("This point should not be reached");
+                    }
+                }
+                catch (SqlException e)
+                {
+                    if (requestedExceptions > 30)
+                    {
+                        Assert.Contains("Resource has been recently updated or added", e.Message);
+                    }
+                    else
+                    {
+                        throw;
+                    }
+                }
+            }
+            finally
+            {
+                await _fixture.SqlHelper.ExecuteSqlCmd("IF object_id('Resource_Trigger') IS NOT NULL DROP TRIGGER Resource_Trigger");
+            }
+        }
 
         [Fact]
         [FhirStorageTestsFixtureArgumentSets(DataStore.SqlServer)]
@@ -217,11 +261,12 @@ namespace Microsoft.Health.Fhir.Tests.Integration.Persistence
             }
         }
 
+#if NET8_0_OR_GREATER
         [Fact]
         public async Task GivenAResource_WhenUpserting_ThenTheNewResourceHasMetaSet()
         {
             var instant = new DateTimeOffset(DateTimeOffset.Now.Date, TimeSpan.Zero);
-            using (Mock.Property(() => ClockResolver.UtcNowFunc, () => instant))
+            using (Mock.Property(() => ClockResolver.TimeProvider, new Microsoft.Extensions.Time.Testing.FakeTimeProvider(instant)))
             {
                 var versionId = Guid.NewGuid().ToString();
                 var resource = Samples.GetJsonSample("Weight").UpdateVersion(versionId);
@@ -243,6 +288,7 @@ namespace Microsoft.Health.Fhir.Tests.Integration.Persistence
                 Assert.NotEqual(versionId, deserialized.VersionId);
             }
         }
+#endif
 
         [Fact(Skip = "Not valid for merge")]
         public async Task GivenASavedResource_WhenUpserting_ThenRawResourceVersionIsSetOrMetaSetIsSetToFalse()

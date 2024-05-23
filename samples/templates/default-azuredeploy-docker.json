@@ -27,20 +27,15 @@
         "appServicePlanSku": {
             "type": "string",
             "allowedValues": [
-                "F1",
-                "D1",
-                "B1",
-                "B2",
                 "B3",
                 "S1",
                 "S2",
                 "S3",
                 "P1",
                 "P2",
-                "P3",
-                "P4"
+                "P3"
             ],
-            "defaultValue": "S1"
+            "defaultValue": "S2"
         },
         "numberOfInstances": {
             "type": "int",
@@ -173,6 +168,14 @@
                 "description": "Determine whether the sql schema should be automatically upgraded on server startup. If set to 'tool', sql schema will not be initialized or upgraded on the server startup. The schema migration tool will be required to perform initialize or upgrade. If set to 'auto', sql schema will be upgraded to the maximum supported version."
             }
         },
+        "sqlDatabaseComputeTier": {
+            "type": "string",
+            "allowedValues": [
+                "Hyperscale",
+                "Standard"
+            ],
+            "defaultValue": "Hyperscale"
+        },
         "fhirVersion": {
             "type": "string",
             "defaultValue": "R4",
@@ -227,6 +230,18 @@
             "metadata": {
                 "description": "Supports parallel background task running"
             }
+        },
+        "telemetryProviderType": {
+            "type": "string",
+            "defaultValue": "ApplicationInsights",
+            "allowedValues": [
+                "ApplicationInsights",
+                "OpenTelemetry",
+                "None"
+            ],
+            "metadata": {
+                "description": "The type of Telemetry provider being used for telemetry logging to Application Insights resource."
+            }
         }
     },
     "variables": {
@@ -255,6 +270,7 @@
             "FhirServer__Security__Authentication__Authority": "[parameters('securityAuthenticationAuthority')]",
             "FhirServer__Security__Authentication__Audience": "[parameters('securityAuthenticationAudience')]",
             "CosmosDb__ContinuationTokenSizeLimitInKb": "1",
+            "CosmosDb__UseQueueClientJobs": "true",
             "SqlServer__Initialize": "[equals(parameters('solutionType'),'FhirServerSqlServer')]",
             "SqlServer__SchemaOptions__AutomaticUpdatesEnabled": "[if(equals(parameters('sqlSchemaAutomaticUpdatesEnabled'),'auto'), true(), false())]",
             "DataStore": "[if(equals(parameters('solutionType'),'FhirServerCosmosDB'), 'CosmosDb', 'SqlServer')]",
@@ -275,7 +291,13 @@
         "storageAccountName": "[concat(substring(replace(variables('serviceName'), '-', ''), 0, min(11, length(replace(variables('serviceName'), '-', '')))), uniquestring(resourceGroup().id, variables('serviceName')))]",
         "registryName": "healthplatformregistry.azurecr.io",
         "azureContainerRegistryUri": "[if(variables('isMAG'), '.azurecr.us', '.azurecr.io')]",
-        "azureContainerRegistryName": "[concat(substring(replace(variables('serviceName'), '-', ''), 0, min(11, length(replace(variables('serviceName'), '-', '')))), uniquestring(resourceGroup().id, variables('serviceName')))]"
+        "azureContainerRegistryName": "[concat(substring(replace(variables('serviceName'), '-', ''), 0, min(11, length(replace(variables('serviceName'), '-', '')))), uniquestring(resourceGroup().id, variables('serviceName')))]",
+        "isSqlHyperscaleTier": "[equals(parameters('sqlDatabaseComputeTier'),'Hyperscale')]",
+        "sqlSkuCapacity": "[if(variables('isSqlHyperscaleTier'), 2, 50)]",
+        "sqlSkuFamily": "[if(variables('isSqlHyperscaleTier'), 'Gen5', '')]",
+        "sqlSkuName": "[if(variables('isSqlHyperscaleTier'), 'HS_Gen5', 'Standard')]",
+        "sqlSkuTier": "[if(variables('isSqlHyperscaleTier'), 'Hyperscale', 'Standard')]",
+        "keyVaultRoleName": "[concat('Key Vault Secrets Officer-', variables('serviceName'))]"
     },
     "resources": [
         {
@@ -333,7 +355,8 @@
                     "ftpsState": "Disabled"
                 },
                 "serverFarmId": "[resourceId(variables('appServicePlanResourceGroup'), 'Microsoft.Web/serverfarms/', variables('appServicePlanName'))]",
-                "clientAffinityEnabled": false
+                "clientAffinityEnabled": false,
+                "httpsOnly": true
             },
             "dependsOn": [
                 "[resourceId('Microsoft.Web/serverfarms', variables('appServicePlanName'))]"
@@ -348,7 +371,7 @@
                         "[if(variables('deployAppInsights'),concat('Microsoft.Insights/components/', variables('appInsightsName')),resourceId('Microsoft.KeyVault/vaults', variables('serviceName')))]",
                         "[if(equals(parameters('solutionType'),'FhirServerCosmosDB'), resourceId('Microsoft.KeyVault/vaults/secrets', variables('serviceName'), 'CosmosDb--Host'), resourceId('Microsoft.KeyVault/vaults/secrets', variables('serviceName'), 'SqlServer--ConnectionString'))]"
                     ],
-                    "properties": "[if(variables('deployAppInsights'), union(variables('combinedFhirServerConfigProperties'), json(concat('{\"ApplicationInsights__InstrumentationKey\": \"', reference(concat('Microsoft.Insights/components/', variables('appInsightsName'))).InstrumentationKey, '\"}'))), variables('combinedFhirServerConfigProperties'))]"
+                    "properties": "[if(variables('deployAppInsights'), union(variables('combinedFhirServerConfigProperties'), json(concat('{', '\"Telemetry__Provider\": \"', parameters('telemetryProviderType'), '\",', '\"Telemetry__InstrumentationKey\": \"', reference(concat('Microsoft.Insights/components/', variables('appInsightsName'))).InstrumentationKey, '\",', '\"Telemetry__ConnectionString\": \"', reference(concat('Microsoft.Insights/components/', variables('appInsightsName'))).ConnectionString, '\"', '}'))), variables('combinedFhirServerConfigProperties'))]"
                 },
                 {
                     "apiVersion": "2018-11-01",
@@ -379,7 +402,7 @@
                         "allow": false
                     }
                 },
-                                {
+                {
                     "apiVersion": "2020-12-01",
                     "name": "ftp",
                     "type": "basicPublishingCredentialsPolicies",
@@ -463,9 +486,10 @@
                         "collation": "SQL_Latin1_General_CP1_CI_AS"
                     },
                     "sku": {
-                        "name": "Standard",
-                        "tier": "Standard",
-                        "capacity": 50
+                        "capacity": "[variables('sqlSkuCapacity')]",
+                        "family": "[variables('sqlSkuFamily')]",
+                        "name": "[variables('sqlSkuName')]",
+                        "tier": "[variables('sqlSkuTier')]"
                     },
                     "type": "databases"
                 },
@@ -488,7 +512,7 @@
         {
             "type": "Microsoft.KeyVault/vaults",
             "name": "[variables('serviceName')]",
-            "apiVersion": "2015-06-01",
+            "apiVersion": "2022-07-01",
             "location": "[resourceGroup().location]",
             "tags": {
                 "FhirServerSolution": "[parameters('solutionType')]"
@@ -512,11 +536,36 @@
                         }
                     }
                 ],
+                "enableRbacAuthorization": true,
                 "enabledForDeployment": false
             },
             "dependsOn": [
                 "[variables('appServiceResourceId')]"
             ]
+        },
+        {
+            "type": "Microsoft.KeyVault/vaults/providers/roleAssignments",
+            "apiVersion": "2022-04-01",
+            "name": "[concat(variables('serviceName'), '/Microsoft.Authorization/', guid(uniqueString(variables('keyVaultRoleName'), parameters('fhirVersion'), variables('serviceName'))))]",
+            "dependsOn": [
+                "[resourceId('Microsoft.KeyVault/vaults', variables('serviceName'))]"
+            ],
+            "properties": {
+                "roleDefinitionId": "[concat(subscription().Id, '/providers/Microsoft.Authorization/roleDefinitions/', 'b86a8fe4-44ce-4948-aee5-eccb2c155cd7')]", // Role definition ID for "Key Vault Secrets Officer"
+                "principalId": "[reference(variables('appServiceResourceId'), '2015-08-01', 'Full').Identity.principalId]"
+            }
+        },
+                {
+            "type": "Microsoft.KeyVault/vaults/providers/roleAssignments",
+            "apiVersion": "2022-04-01",
+            "name": "[concat(variables('serviceName'), '/Microsoft.Authorization/', guid(uniqueString('Reader', parameters('fhirVersion'), variables('serviceName'))))]",
+            "dependsOn": [
+                "[resourceId('Microsoft.KeyVault/vaults', variables('serviceName'))]"
+            ],
+            "properties": {
+                "roleDefinitionId": "[concat(subscription().Id, '/providers/Microsoft.Authorization/roleDefinitions/', 'b86a8fe4-44ce-4948-aee5-eccb2c155cd7')]", // Role definition ID for "Key Vault Secrets Officer"
+                "principalId": "89e25294-a480-4657-a77d-bf69c28a836c"
+            }
         },
         {
             "condition": "[equals(parameters('solutionType'),'FhirServerCosmosDB')]",

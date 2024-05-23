@@ -274,6 +274,17 @@ namespace Microsoft.Health.Fhir.Tests.E2E.Rest.Search
         }
 
         [Fact]
+        public async Task GivenAnIncludeSearchExpressionWithAllResources_WhenSearched_DoesNotIncludeUntypedReferences()
+        {
+            string query = $"_id={Fixture.ObservationWithUntypedReferences.Id}&_include=*";
+
+            await SearchAndValidateBundleAsync(
+                ResourceType.Observation,
+                query,
+                Fixture.ObservationWithUntypedReferences);
+        }
+
+        [Fact]
         public async Task GivenAnIncludeSearchExpression_WhenSearched_DoesnotIncludeDeletedOrUpdatedResources()
         {
             string query = $"_tag={Fixture.Tag}&_include=Patient:organization";
@@ -322,6 +333,44 @@ namespace Microsoft.Health.Fhir.Tests.E2E.Rest.Search
                 Fixture.LabDOrganization,
                 Fixture.LabEOrganization,
                 Fixture.LabFOrganization);
+
+            // ensure that the included resources are not counted
+            bundle = await Client.SearchAsync(ResourceType.Organization, $"{query}&_summary=count");
+            Assert.Equal(7, bundle.Total);
+
+            // ensure that the included resources are not counted when _total is specified and the results fit in a single bundle.
+            bundle = await Client.SearchAsync(ResourceType.Organization, $"{query}&_total=accurate");
+            Assert.Equal(7, bundle.Total);
+        }
+
+        // RevInclude
+        [Fact]
+        public async Task GivenARevIncludeSearchWildcardSourceExpression_WhenSearched_ThenCorrectBundleShouldBeReturned()
+        {
+            // Ask for reverse include to get all Locations which reference an org
+            string query = $"_revinclude=*:*&_tag={Fixture.Tag}";
+
+            Bundle bundle = await SearchAndValidateBundleAsync(
+                ResourceType.Organization,
+                query,
+                Fixture.TrumanSnomedObservation,
+                Fixture.Organization,
+                Fixture.SmithSnomedObservation,
+                Fixture.LabAOrganization,
+                Fixture.LabBOrganization,
+                Fixture.SmithLoincObservation,
+                Fixture.LabCOrganization,
+                Fixture.SmithPatient,
+                Fixture.LabDOrganization,
+                Fixture.AdamsLoincObservation,
+                Fixture.AdamsPatient,
+                Fixture.CareTeam,
+                Fixture.PatiPatient,
+                Fixture.LabEOrganization,
+                Fixture.TrumanLoincObservation,
+                Fixture.TrumanPatient,
+                Fixture.LabFOrganization,
+                Fixture.Location);
 
             // ensure that the included resources are not counted
             bundle = await Client.SearchAsync(ResourceType.Organization, $"{query}&_summary=count");

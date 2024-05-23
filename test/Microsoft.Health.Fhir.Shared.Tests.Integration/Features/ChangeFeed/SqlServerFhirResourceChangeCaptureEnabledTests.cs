@@ -172,7 +172,7 @@ namespace Microsoft.Health.Fhir.Tests.Integration.Features.ChangeFeed
             var resource = await store.GetAsync(new ResourceKey("Organization", create.Id, create.VersionId), CancellationToken.None);
             Assert.NotNull(resource);
 
-            await store.HardDeleteAsync(new ResourceKey("Organization", create.Id), false, cts.Token);
+            await store.HardDeleteAsync(new ResourceKey("Organization", create.Id), false, false, cts.Token);
 
             resource = await store.GetAsync(new ResourceKey("Organization", create.Id, create.VersionId), CancellationToken.None);
             Assert.Null(resource);
@@ -190,6 +190,45 @@ namespace Microsoft.Health.Fhir.Tests.Integration.Features.ChangeFeed
             }
 
             Assert.Equal(0, await GetCount());
+            DisableInvisibleHistory();
+        }
+
+        [Fact]
+        public async Task GivenChangeCaptureEnabledAndNoVersionPolicy_AfterHardDeleting_CanRecreateResource()
+        {
+            EnableDatabaseLogging();
+            EnableInvisibleHistory();
+
+            var create = await _fixture.Mediator.CreateResourceAsync(Samples.GetDefaultOrganization());
+            Assert.Equal("1", create.VersionId);
+            var id = create.Id;
+
+            var store = (SqlServerFhirDataStore)_fixture.DataStore;
+            await store.HardDeleteAsync(new ResourceKey("Organization", id), false, false, CancellationToken.None);
+
+            var reCreate = await _fixture.Mediator.UpsertResourceAsync(Samples.GetDefaultOrganization().UpdateId(id));
+            Assert.Equal(id, reCreate.RawResourceElement.Id);
+            Assert.Equal("2", reCreate.RawResourceElement.VersionId);
+
+            DisableInvisibleHistory();
+        }
+
+        [Fact]
+        public async Task GivenChangeCaptureEnabledAndNoVersionPolicy_AfterSoftDeleting_CanRecreateResource()
+        {
+            EnableDatabaseLogging();
+            EnableInvisibleHistory();
+
+            var create = await _fixture.Mediator.CreateResourceAsync(Samples.GetDefaultOrganization());
+            Assert.Equal("1", create.VersionId);
+            var id = create.Id;
+
+            await _fixture.Mediator.DeleteResourceAsync(new ResourceKey("Organization", id), DeleteOperation.SoftDelete);
+
+            var reCreate = await _fixture.Mediator.UpsertResourceAsync(Samples.GetDefaultOrganization().UpdateId(id));
+            Assert.Equal(id, reCreate.RawResourceElement.Id);
+            Assert.Equal("3", reCreate.RawResourceElement.VersionId);
+
             DisableInvisibleHistory();
         }
 
